@@ -23,40 +23,14 @@ export default function (server: Server, ctx: AppContext) {
       const blob = await ctx.actorStore.writeNoTransaction(
         requester,
         async (store) => {
-          let metadata: BlobMetadata
-          try {
-            metadata = await store.repo.blob.uploadBlobAndGetMetadata(
-              input.encoding,
-              input.body,
-            )
-          } catch (err) {
-            if (err?.['name'] === 'AbortError') {
-              throw new UpstreamTimeoutError(
-                'Upload timed out, please try again.',
-              )
-            }
-            throw err
+          const encoding = input.encoding
+
+          if (encoding.startsWith('url/')) {
+            const url = encoding.slice(4)
+            return uploadUrlBlob(store, input, url)
+          } else {
+            return uploadNormalBlob(store, input)
           }
-
-          return store.transact(async (actorTxn) => {
-            const blobRef =
-              await actorTxn.repo.blob.trackUntetheredBlob(metadata)
-
-            // make the blob permanent if an associated record is already indexed
-            const recordsForBlob = await actorTxn.repo.blob.getRecordsForBlob(
-              blobRef.ref,
-            )
-            if (recordsForBlob.length > 0) {
-              await actorTxn.repo.blob.verifyBlobAndMakePermanent({
-                cid: blobRef.ref,
-                mimeType: blobRef.mimeType,
-                size: blobRef.size,
-                constraints: {},
-              })
-            }
-
-            return blobRef
-          })
         },
       )
 
@@ -67,5 +41,63 @@ export default function (server: Server, ctx: AppContext) {
         },
       }
     },
+  })
+}
+
+async function uploadUrlBlob(store, input, url) {
+  let metadata: BlobMetadata
+  try {
+    metadata = await store.repo.blob.getMetadataWithoutInsertingBlob(
+      '*/*',
+      input.body,
+    )
+  } catch (err) {
+    if (err?.['name'] === 'AbortError') {
+      throw new UpstreamTimeoutError('Upload timed out, please try again.')
+    }
+    throw err
+  }
+
+  return store.transact(async (actorTxn) => {
+    const blobRef = await actorTxn.repo.blob.insertPermanentBlobMetadataWithUrl(
+      url,
+      metadata,
+    )
+
+    return blobRef
+  })
+}
+
+async function uploadNormalBlob(store, input) {
+  let metadata: BlobMetadata
+  try {
+    metadata = await store.repo.blob.uploadBlobAndGetMetadata(
+      input.encoding,
+      input.body,
+    )
+  } catch (err) {
+    if (err?.['name'] === 'AbortError') {
+      throw new UpstreamTimeoutError('Upload timed out, please try again.')
+    }
+    throw err
+  }
+
+  return store.transact(async (actorTxn) => {
+    const blobRef = await actorTxn.repo.blob.trackUntetheredBlob(metadata)
+
+    // make the blob permanent if an associated record is already indexed
+    const recordsForBlob = await actorTxn.repo.blob.getRecordsForBlob(
+      blobRef.ref,
+    )
+    if (recordsForBlob.length > 0) {
+      await actorTxn.repo.blob.verifyBlobAndMakePermanent({
+        cid: blobRef.ref,
+        mimeType: blobRef.mimeType,
+        size: blobRef.size,
+        constraints: {},
+      })
+    }
+
+    return blobRef
   })
 }

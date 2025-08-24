@@ -7,6 +7,7 @@ export interface Blob {
   height: number | null
   createdAt: string
   takedownRef: string | null
+  url: string | null
 }
 
 export const tableName = 'blob'

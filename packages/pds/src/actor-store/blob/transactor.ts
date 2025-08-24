@@ -53,6 +53,69 @@ export class BlobTransactor extends BlobReader {
     }
   }
 
+  async getMetadataWithoutInsertingBlob(
+    userSuggestedMime: string,
+    blobStream: stream.Readable,
+  ): Promise<BlobMetadata> {
+    const [size, sha256, imgInfo, sniffedMime] = await Promise.all([
+      streamSize(cloneStream(blobStream)),
+      sha256Stream(cloneStream(blobStream)),
+      img.maybeGetInfo(cloneStream(blobStream)),
+      mimeTypeFromStream(cloneStream(blobStream)),
+    ])
+
+    const cid = sha256RawToCid(sha256)
+    const mimeType = sniffedMime || userSuggestedMime
+    const tempKey = ''
+
+    return {
+      tempKey,
+      size,
+      cid,
+      mimeType,
+      width: imgInfo?.width ?? null,
+      height: imgInfo?.height ?? null,
+    }
+  }
+
+  async insertPermanentBlobMetadataWithUrl(
+    url: string,
+    metadata: BlobMetadata,
+  ) {
+    const { size, cid, mimeType, width, height } = metadata
+    const tempKey = null
+
+    const found = await this.db.db
+      .selectFrom('blob')
+      .selectAll()
+      .where('cid', '=', cid.toString())
+      .executeTakeFirst()
+    if (found?.takedownRef) {
+      throw new InvalidRequestError('Blob has been takendown, cannot re-upload')
+    }
+
+    await this.db.db
+      .insertInto('blob')
+      .values({
+        cid: cid.toString(),
+        mimeType,
+        size,
+        tempKey,
+        width,
+        height,
+        createdAt: new Date().toISOString(),
+        url: url,
+      })
+      .onConflict((oc) =>
+        oc
+          .column('cid')
+          .doUpdateSet({ tempKey })
+          .where('blob.tempKey', 'is not', null),
+      )
+      .execute()
+    return new BlobRef(cid, mimeType, size)
+  }
+
   async uploadBlobAndGetMetadata(
     userSuggestedMime: string,
     blobStream: stream.Readable,

@@ -1,4 +1,4 @@
-import stream from 'node:stream'
+import stream, { Readable } from 'node:stream'
 import { CID } from 'multiformats/cid'
 import { BlobNotFoundError, BlobStore } from '@atproto/repo'
 import { InvalidRequestError } from '@atproto/xrpc-server'
@@ -31,21 +31,68 @@ export class BlobReader {
     }
   }
 
+  async getBlobMetadataWithUrl(
+    cid: CID,
+  ): Promise<{ size: number; mimeType?: string; url?: string }> {
+    const { ref } = this.db.db.dynamic
+    const found = await this.db.db
+      .selectFrom('blob')
+      .selectAll()
+      .where('blob.cid', '=', cid.toString())
+      .where(notSoftDeletedClause(ref('blob')))
+      .executeTakeFirst()
+    if (!found) {
+      throw new InvalidRequestError('Blob not found')
+    }
+    return {
+      size: found.size,
+      mimeType: found.mimeType,
+      url: found.url ?? undefined,
+    }
+  }
+
+  async streamFromUrl(url: string): Promise<stream.Readable> {
+    // Use fetch to get the response body as a stream
+    // Note: globalThis.fetch is available in Node 18+
+    const res = await fetch(url)
+    if (!res.ok || !res.body) {
+      throw new InvalidRequestError(`Failed to fetch blob from url: ${url}`)
+    }
+    // Use Readable.fromWeb from node:stream to convert the web ReadableStream to a Node.js Readable
+    return Readable.fromWeb(res.body)
+  }
+
   async getBlob(
     cid: CID,
   ): Promise<{ size: number; mimeType?: string; stream: stream.Readable }> {
-    const metadata = await this.getBlobMetadata(cid)
+    let metadataWithUrl = await this.getBlobMetadataWithUrl(cid)
     let blobStream
-    try {
-      blobStream = await this.blobstore.getStream(cid)
-    } catch (err) {
-      if (err instanceof BlobNotFoundError) {
-        throw new InvalidRequestError('Blob not found')
+
+    if (metadataWithUrl.url) {
+      try {
+        blobStream = await this.streamFromUrl(metadataWithUrl.url)
+      } catch (err) {
+        if (err instanceof BlobNotFoundError) {
+          throw new InvalidRequestError('Blob not found')
+        }
+        throw err
       }
-      throw err
+    } else {
+      metadataWithUrl = await this.getBlobMetadata(cid)
+
+      try {
+        blobStream = await this.blobstore.getStream(cid)
+      } catch (err) {
+        if (err instanceof BlobNotFoundError) {
+          throw new InvalidRequestError('Blob not found')
+        }
+        throw err
+      }
     }
+
     return {
-      ...metadata,
+      size: metadataWithUrl.size,
+      mimeType: metadataWithUrl.mimeType,
       stream: blobStream,
     }
   }
